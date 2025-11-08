@@ -24,7 +24,7 @@ class TrinityCoordinator: ObservableObject {
     private let agentCoordinator: AgentCoordinator
 
     // MARK: - Agents
-    private let perceptionAgent: PerceptionAgent
+    private let perceptionAgent: ProductionPerceptionAgent
     private let navigationAgent: NavigationAgent
     private let contextAgent: ContextAgent
     private let communicationAgent: CommunicationAgent
@@ -41,14 +41,14 @@ class TrinityCoordinator: ObservableObject {
 
     init() throws {
         // Initialize components
-        let vectorDB = try VectorDatabase()
+        let vectorDB = try HNSWVectorDatabase()
         self.memoryManager = MemoryManager(vectorDatabase: vectorDB)
         self.embeddingGenerator = try EmbeddingGenerator()
         self.sensorManager = SensorManager()
         self.agentCoordinator = AgentCoordinator()
 
         // Initialize agents
-        self.perceptionAgent = try PerceptionAgent(embeddingGenerator: embeddingGenerator)
+        self.perceptionAgent = try ProductionPerceptionAgent(embeddingGenerator: embeddingGenerator)
         self.navigationAgent = NavigationAgent()
         self.contextAgent = ContextAgent(memoryManager: memoryManager)
         self.communicationAgent = CommunicationAgent()

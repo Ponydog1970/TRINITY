@@ -22,9 +22,9 @@ class MemoryManager: ObservableObject {
     private let similarityThreshold: Float = 0.95  // For deduplication
 
     private let deduplicationEngine: DeduplicationEngine
-    private let vectorDatabase: VectorDatabase
+    let vectorDatabase: VectorDatabaseProtocol
 
-    init(vectorDatabase: VectorDatabase) {
+    init(vectorDatabase: VectorDatabaseProtocol) {
         self.vectorDatabase = vectorDatabase
         self.deduplicationEngine = DeduplicationEngine(
             similarityThreshold: similarityThreshold
