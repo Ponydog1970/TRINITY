@@ -27,6 +27,13 @@ class Configuration {
         set { UserDefaults.standard.set(newValue, forKey: "claude_api_key") }
     }
 
+    /// Perplexity API Key (optional)
+    /// Hole von: https://www.perplexity.ai/settings/api
+    var perplexityKey: String? {
+        get { UserDefaults.standard.string(forKey: "perplexity_api_key") }
+        set { UserDefaults.standard.set(newValue, forKey: "perplexity_api_key") }
+    }
+
     // MARK: - Perception Mode
 
     enum PerceptionMode: String, CaseIterable {
@@ -92,9 +99,14 @@ class Configuration {
         return key.hasPrefix("sk-ant-") && key.count > 20
     }
 
+    func hasValidPerplexityKey() -> Bool {
+        guard let key = perplexityKey else { return false }
+        return key.hasPrefix("pplx-") && key.count > 20
+    }
+
     func canUseCloudAPIs() -> Bool {
         guard allowCloudProcessing else { return false }
-        return hasValidOpenAIKey() || hasValidClaudeKey()
+        return hasValidOpenAIKey() || hasValidClaudeKey() || hasValidPerplexityKey()
     }
 
     // MARK: - Rate Limiting
@@ -138,6 +150,10 @@ extension Configuration {
         if let claudeKey = ProcessInfo.processInfo.environment["CLAUDE_API_KEY"] {
             self.claudeKey = claudeKey
         }
+
+        if let perplexityKey = ProcessInfo.processInfo.environment["PERPLEXITY_API_KEY"] {
+            self.perplexityKey = perplexityKey
+        }
     }
 
     /// Lade aus .env File (nicht für Production!)
@@ -157,6 +173,8 @@ extension Configuration {
                 openAIKey = value
             case "CLAUDE_API_KEY":
                 claudeKey = value
+            case "PERPLEXITY_API_KEY":
+                perplexityKey = value
             default:
                 break
             }
@@ -180,6 +198,7 @@ extension Configuration {
     func clearAllKeys() {
         openAIKey = nil
         claudeKey = nil
+        perplexityKey = nil
     }
 
     /// Export Einstellungen (ohne API Keys!)
@@ -214,6 +233,7 @@ extension Configuration {
  // API Keys setzen:
  Configuration.shared.openAIKey = "sk-..."
  Configuration.shared.claudeKey = "sk-ant-..."
+ Configuration.shared.perplexityKey = "pplx-..."
 
  // Mode setzen:
  Configuration.shared.perceptionMode = .cloudEnhanced
@@ -221,6 +241,14 @@ extension Configuration {
  // Prüfen:
  if Configuration.shared.canUseCloudAPIs() {
      // Nutze Cloud APIs
+ }
+
+ // Spezifische API prüfen:
+ if Configuration.shared.hasValidClaudeKey() {
+     // Anthropic Claude verfügbar (EMPFOHLEN für Vision!)
+ }
+ if Configuration.shared.hasValidPerplexityKey() {
+     // Perplexity verfügbar (für Web-Suche)
  }
 
  // Rate Limiting:
