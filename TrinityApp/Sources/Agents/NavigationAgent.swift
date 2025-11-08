@@ -87,11 +87,15 @@ enum ObstacleType {
     }
 }
 
-enum Severity {
-    case low      // > 3 meters away
-    case medium   // 1-3 meters
-    case high     // < 1 meter
-    case critical // immediate danger
+enum Severity: Int, Comparable {
+    case low = 0      // > 3 meters away
+    case medium = 1   // 1-3 meters
+    case high = 2     // < 1 meter
+    case critical = 3 // immediate danger
+
+    static func < (lhs: Severity, rhs: Severity) -> Bool {
+        return lhs.rawValue < rhs.rawValue
+    }
 }
 
 struct SafetyWarning {
@@ -104,7 +108,7 @@ class NavigationAgent: BaseAgent<NavigationInput, NavigationOutput> {
     private let minSafeDistance: Float = 1.0  // meters
     private let warningDistance: Float = 2.0  // meters
 
-    override init() {
+    init() {
         super.init(name: "NavigationAgent")
     }
 

@@ -66,7 +66,7 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
         case detailed // Everything
     }
 
-    override init() {
+    init() {
         super.init(name: "CommunicationAgent")
     }
 

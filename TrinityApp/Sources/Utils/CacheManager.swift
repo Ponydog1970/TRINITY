@@ -93,6 +93,11 @@ class CacheManager: ObservableObject {
         }
 
         // 2. Semantic Cache (Tier 2) - Similar Match via RAG
+        // TODO: Vollständig implementieren - Type Mismatch Problem
+        // VectorEntry.metadata ist MemoryMetadata, nicht VisionAnalysisResult
+        // Benötigt separate Cache-Entry-Struktur oder Wrapper-Type
+        // Siehe auch cacheVisionResult() Zeile ~181 wo save() auskommentiert ist
+        /*
         if let vectorDB = vectorCache {
             // Generiere Embedding für Prompt
             let promptEmbedding = await generatePromptEmbedding(prompt)
@@ -108,19 +113,14 @@ class CacheManager: ObservableObject {
                 let similarity = cosineSimilarity(promptEmbedding, similar.embedding)
 
                 if similarity >= similarityThreshold {
-                    // Ähnliche Query gefunden! Nutze gecachtes Result
-                    if let cachedResult = similar.metadata as? VisionAnalysisResult {
-                        cacheHits += 1
-                        print("💾 Semantic Cache HIT (Tier 2) - Similarity: \(similarity)")
-
-                        // Füge zu Memory Cache hinzu
-                        addToMemoryCache(exactKey, result: cachedResult)
-
-                        return cachedResult
-                    }
+                    // Ähnliche Query gefunden!
+                    cacheHits += 1
+                    print("💾 Semantic Cache HIT (Tier 2) - Similarity: \(similarity)")
+                    // TODO: Korrekte Rückgabe implementieren
                 }
             }
         }
+        */
 
         // 3. Disk Cache (Tier 3) - Exact Match
         if let diskResult = try? loadFromDisk(key: exactKey) as? VisionAnalysisResult {
@@ -213,6 +213,11 @@ class CacheManager: ObservableObject {
         }
 
         // Tier 2: Semantic (via RAG)
+        // TODO: Vollständig implementieren - Type Mismatch Problem
+        // vectorDB.search() gibt VectorEntry zurück, nicht EnhancedVectorEntry
+        // Code versucht .objectType, .description, .confidence zu verwenden (Zeilen 230, 236-237)
+        // Diese Properties existieren nicht auf VectorEntry
+        /*
         if let vectorDB = vectorCache {
             let promptEmbedding = await generatePromptEmbedding(prompt)
 
@@ -226,27 +231,13 @@ class CacheManager: ObservableObject {
                 let similarity = cosineSimilarity(promptEmbedding, similar.embedding)
 
                 if similarity >= similarityThreshold {
-                    // Check if it's a cached query
-                    if similar.objectType == "cached_query_result" {
-                        cacheHits += 1
-                        print("💾 Semantic Cache HIT (Query) - Similarity: \(similarity)")
-
-                        // Reconstruct QueryResult (simplified)
-                        let result = QueryResult(
-                            answer: similar.description,
-                            confidence: similar.confidence,
-                            citations: [],
-                            provider: .local,
-                            model: model,
-                            cached: true
-                        )
-
-                        addToMemoryCache(key, result: result)
-                        return result
-                    }
+                    cacheHits += 1
+                    print("💾 Semantic Cache HIT (Query) - Similarity: \(similarity)")
+                    // TODO: Korrekte Rekonstruktion implementieren
                 }
             }
         }
+        */
 
         // Tier 3: Disk
         if let diskResult = try? loadFromDisk(key: key) as? QueryResult {

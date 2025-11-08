@@ -16,14 +16,14 @@ class RouteRecordingManager: NSObject, ObservableObject {
     // MARK: - Published State
 
     @Published var isRecording: Bool = false
-    @Published var currentRoute: Route?
-    @Published var savedRoutes: [Route] = []
+    @Published var currentRoute: RecordedRoute?
+    @Published var savedRoutes: [RecordedRoute] = []
 
     // MARK: - Configuration
 
     private let minimumDistance: Double = 5.0       // Min 5 Meter zwischen Waypoints
     private let locationManager: CLLocationManager
-    private var currentWaypoints: [Waypoint] = []
+    private var currentWaypoints: [RecordedWaypoint] = []
     private var lastLocation: CLLocation?
 
     // MARK: - Initialization
@@ -49,7 +49,7 @@ class RouteRecordingManager: NSObject, ObservableObject {
 
         locationManager.startUpdatingLocation()
 
-        currentRoute = Route(
+        currentRoute = RecordedRoute(
             id: UUID(),
             name: name ?? "Route \(Date().formatted())",
             waypoints: [],
@@ -88,7 +88,7 @@ class RouteRecordingManager: NSObject, ObservableObject {
 
     // MARK: - Route Management
 
-    func getSavedRoutes() -> [Route] {
+    func getSavedRoutes() -> [RecordedRoute] {
         return savedRoutes.sorted { $0.startTime > $1.startTime }
     }
 
@@ -97,8 +97,8 @@ class RouteRecordingManager: NSObject, ObservableObject {
         saveRoutes()
     }
 
-    func findSimilarRoute(to location: CLLocation, radius: Double = 100) -> Route? {
-        // Findet Route die in der Nähe startet
+    func findSimilarRoute(to location: CLLocation, radius: Double = 100) -> RecordedRoute? {
+        // Findet RecordedRoute die in der Nähe startet
         return savedRoutes.first { route in
             guard let firstWaypoint = route.waypoints.first else { return false }
 
@@ -113,8 +113,8 @@ class RouteRecordingManager: NSObject, ObservableObject {
 
     // MARK: - Route Export
 
-    /// Exportiert Route als GPX für Navigation-Apps
-    func exportToGPX(route: Route) throws -> URL {
+    /// Exportiert RecordedRoute als GPX für Navigation-Apps
+    func exportToGPX(route: RecordedRoute) throws -> URL {
         let gpxString = generateGPX(route: route)
 
         let tempURL = FileManager.default.temporaryDirectory
@@ -125,8 +125,8 @@ class RouteRecordingManager: NSObject, ObservableObject {
         return tempURL
     }
 
-    /// Exportiert Route für Apple Maps
-    func exportToAppleMaps(route: Route) throws {
+    /// Exportiert RecordedRoute für Apple Maps
+    func exportToAppleMaps(route: RecordedRoute) throws {
         guard let firstWaypoint = route.waypoints.first,
               let lastWaypoint = route.waypoints.last else {
             throw RouteError.invalidRoute
@@ -154,7 +154,7 @@ class RouteRecordingManager: NSObject, ObservableObject {
     }
 
     /// Exportiert Waypoints für Google Maps URL
-    func generateGoogleMapsURL(route: Route) -> URL? {
+    func generateGoogleMapsURL(route: RecordedRoute) -> URL? {
         guard let firstWaypoint = route.waypoints.first,
               let lastWaypoint = route.waypoints.last else {
             return nil
@@ -183,8 +183,8 @@ class RouteRecordingManager: NSObject, ObservableObject {
 
     // MARK: - Route Analysis
 
-    func analyzeRoute(_ route: Route) -> RouteAnalysis {
-        // Analysiere Route für Muster, häufige Wege, etc.
+    func analyzeRoute(_ route: RecordedRoute) -> RouteAnalysis {
+        // Analysiere RecordedRoute für Muster, häufige Wege, etc.
 
         var analysis = RouteAnalysis(route: route)
 
@@ -200,19 +200,19 @@ class RouteRecordingManager: NSObject, ObservableObject {
         return analysis
     }
 
-    private func identifyFrequentLocations(route: Route) -> [LocationCluster] {
+    private func identifyFrequentLocations(route: RecordedRoute) -> [LocationCluster] {
         // Cluster Waypoints zu häufigen Orten
         // Placeholder
         return []
     }
 
-    private func identifyHazards(route: Route) -> [HazardPoint] {
+    private func identifyHazards(route: RecordedRoute) -> [HazardPoint] {
         // Identifiziere Gefahrenstellen aus Trigger-Historie
         // Placeholder
         return []
     }
 
-    private func checkAccessibility(route: Route) -> [String] {
+    private func checkAccessibility(route: RecordedRoute) -> [String] {
         // Überprüfe Barrierefreiheit
         return [
             "Route größtenteils auf Gehwegen",
@@ -223,7 +223,7 @@ class RouteRecordingManager: NSObject, ObservableObject {
 
     // MARK: - GPX Generation
 
-    private func generateGPX(route: Route) -> String {
+    private func generateGPX(route: RecordedRoute) -> String {
         var gpx = """
         <?xml version="1.0" encoding="UTF-8"?>
         <gpx version="1.1" creator="TRINITY Vision Aid">
@@ -264,7 +264,7 @@ class RouteRecordingManager: NSObject, ObservableObject {
 
     // MARK: - Helpers
 
-    private func calculateTotalDistance(waypoints: [Waypoint]) -> Double {
+    private func calculateTotalDistance(waypoints: [RecordedWaypoint]) -> Double {
         var total: Double = 0.0
 
         for i in 0..<(waypoints.count - 1) {
@@ -297,7 +297,7 @@ class RouteRecordingManager: NSObject, ObservableObject {
         // In production: Load from SwiftData or CloudKit
         let decoder = JSONDecoder()
         if let data = UserDefaults.standard.data(forKey: "saved_routes"),
-           let routes = try? decoder.decode([Route].self, from: data) {
+           let routes = try? decoder.decode([RecordedRoute].self, from: data) {
             savedRoutes = routes
         }
     }
@@ -322,8 +322,8 @@ extension RouteRecordingManager: CLLocationManagerDelegate {
                     }
                 }
 
-                // Erstelle Waypoint
-                let waypoint = Waypoint(
+                // Erstelle RecordedWaypoint
+                let waypoint = RecordedWaypoint(
                     id: UUID(),
                     coordinate: location.coordinate,
                     timestamp: location.timestamp,
@@ -344,10 +344,11 @@ extension RouteRecordingManager: CLLocationManagerDelegate {
 
 // MARK: - Data Models
 
-struct Route: Codable, Identifiable {
+/// GPS-basierte aufgezeichnete Route (unterscheidet sich von ContextAgent.Route)
+struct RecordedRoute: Codable, Identifiable {
     let id: UUID
     var name: String
-    var waypoints: [Waypoint]
+    var waypoints: [RecordedWaypoint]
     let startTime: Date
     var endTime: Date?
 
@@ -370,7 +371,8 @@ struct Route: Codable, Identifiable {
     }
 }
 
-struct Waypoint: Codable {
+/// GPS-Wegpunkt mit Timestamp und Genauigkeit (unterscheidet sich von ContextAgent.Waypoint)
+struct RecordedWaypoint: Codable {
     let id: UUID
     let coordinate: CLLocationCoordinate2D
     let timestamp: Date
@@ -381,7 +383,7 @@ struct Waypoint: Codable {
 }
 
 struct RouteAnalysis {
-    let route: Route
+    let route: RecordedRoute
     var frequentLocations: [LocationCluster] = []
     var hazardPoints: [HazardPoint] = []
     var accessibilityNotes: [String] = []
