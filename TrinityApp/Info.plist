@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Camera Permission -->
+    <key>NSCameraUsageDescription</key>
+    <string>TRINITY benötigt Zugriff auf die Kamera, um Ihre Umgebung zu erkennen und Sie bei der Navigation zu unterstützen.</string>
+
+    <!-- Location Permission -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>TRINITY verwendet Ihren Standort, um ortsbasierte Navigation und Erinnerungen bereitzustellen.</string>
+
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>TRINITY kann Ihren Standort kontinuierlich verfolgen, um bessere Navigationshilfe zu bieten.</string>
+
+    <!-- Microphone (for voice commands, optional) -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>TRINITY kann Ihre Sprachbefehle aufnehmen, um die App besser zu steuern.</string>
+
+    <!-- ARKit -->
+    <key>NSARKitUsageDescription</key>
+    <string>TRINITY nutzt AR-Technologie, um räumliche Informationen über Ihre Umgebung zu sammeln.</string>
+
+    <!-- Required device capabilities -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arkit</string>
+        <string>camera-flash</string>
+    </array>
+
+    <!-- Supported interface orientations -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+
+    <!-- ARKit scene reconstruction -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+    </dict>
+
+    <!-- Accessibility -->
+    <key>UIAccessibilityTraits</key>
+    <string>UIAccessibilityTraitUpdatesFrequently</string>
+
+    <!-- VoiceOver compatibility -->
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+
+    <!-- Background modes (for continuous location updates) -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>location</string>
+        <string>audio</string>
+    </array>
+
+    <!-- iCloud capability -->
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array>
+        <string>iCloud.$(CFBundleIdentifier)</string>
+    </array>
+
+    <!-- Minimum iOS version -->
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+
+    <!-- App name -->
+    <key>CFBundleDisplayName</key>
+    <string>TRINITY Vision Aid</string>
+
+    <key>CFBundleName</key>
+    <string>TRINITY</string>
+
+    <!-- Bundle identifier -->
+    <key>CFBundleIdentifier</key>
+    <string>com.trinity.visionaid</string>
+
+    <!-- Version -->
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Privacy - LiDAR Scanner -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
