@@ -108,6 +108,14 @@ Caches/
 # Logs
 *.log
 
-# Environment
+# Environment & API Keys (NIEMALS committen!)
 .env
 .env.local
+.env.production
+.env.development
+*_api_keys.json
+api_keys.json
+secrets.json
+credentials.json
+*.pem
+*.key
