@@ -18,9 +18,10 @@ class MemoryManager: ObservableObject {
 
     // MARK: - PERFORMANCE OPTIMIZATION: Index Structures
     // Dictionary-based indices for O(1) lookup instead of O(n) array search
-    private var workingIndex: [UUID: VectorEntry] = [:]
-    private var episodicIndex: [UUID: VectorEntry] = [:]
-    private var semanticIndex: [UUID: VectorEntry] = [:]
+    // Internal access for subclasses (e.g., SmartMemoryManager)
+    internal var workingIndex: [UUID: VectorEntry] = [:]
+    internal var episodicIndex: [UUID: VectorEntry] = [:]
+    internal var semanticIndex: [UUID: VectorEntry] = [:]
 
     // LRU Cache for frequently accessed entries (max 50 entries)
     private var accessCache: LRUCache<UUID, VectorEntry>
