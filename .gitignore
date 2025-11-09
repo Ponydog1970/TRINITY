@@ -111,3 +111,4 @@ Caches/
 # Environment
 .env
 .env.local
+*.tar.gz
