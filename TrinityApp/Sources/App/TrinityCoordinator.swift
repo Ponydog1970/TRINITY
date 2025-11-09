@@ -37,6 +37,9 @@ class TrinityCoordinator: ObservableObject {
     // MARK: - Configuration
     private let processingInterval: TimeInterval = 1.0  // Process every 1 second
 
+    // PERFORMANCE OPTIMIZATION: Queue-Limiting for Crash Prevention
+    private let maxQueueSize = 10  // Hard limit to prevent memory crashes
+
     // MARK: - Initialization
 
     init() throws {
@@ -110,8 +113,16 @@ class TrinityCoordinator: ObservableObject {
     private func subscribeToObservations() {
         sensorManager.observationPublisher
             .sink { [weak self] observation in
+                guard let self = self else { return }
+
+                // PERFORMANCE OPTIMIZATION: Backpressure - Drop old frames on overload
+                if self.processingQueue.count >= self.maxQueueSize {
+                    self.processingQueue.removeFirst()
+                    print("⚠️ Dropping old observation - system overloaded")
+                }
+
                 Task { @MainActor in
-                    await self?.processObservation(observation)
+                    await self.processObservation(observation)
                 }
             }
             .store(in: &cancellables)
@@ -172,11 +183,19 @@ class TrinityCoordinator: ObservableObject {
                     throw TrinityError.notConfigured
                 }
 
-                // Store in memory (depends on embedding)
-                try await self.memoryManager.addObservation(observation, embedding: emb)
+                // PERFORMANCE OPTIMIZATION: Intelligent filtering - only store important data
+                var context: [VectorEntry] = []
 
-                // Search for relevant context (depends on embedding)
-                let context = try await self.memoryManager.search(embedding: emb, topK: 10)
+                if self.shouldStore(observation, confidence: perception.confidence) {
+                    // Store in memory (depends on embedding)
+                    try await self.memoryManager.addObservation(observation, embedding: emb)
+
+                    // Search for relevant context (depends on embedding)
+                    context = try await self.memoryManager.search(embedding: emb, topK: 10)
+                } else {
+                    // Skip storage but still search for context with existing memories
+                    context = try await self.memoryManager.search(embedding: emb, topK: 10)
+                }
 
                 return (perception, emb, context)
             }
@@ -239,6 +258,34 @@ class TrinityCoordinator: ObservableObject {
         case perception(PerceptionOutput)
         case embedding([Float])
         case context([VectorEntry])
+    }
+
+    // MARK: - Intelligent Filtering
+
+    /// Determines whether an observation should be stored in memory
+    /// Only stores high-confidence, important observations to prevent memory explosion
+    private func shouldStore(_ observation: Observation, confidence: Float) -> Bool {
+        // 1. Confidence threshold: Only store high-confidence detections
+        guard confidence > 0.75 else {
+            print("📊 Skipping observation: Low confidence (\(String(format: "%.2f", confidence)))")
+            return false
+        }
+
+        // 2. Important object types: Filter out common background objects
+        let importantLabels = ["person", "obstacle", "stairs", "door", "sign", "text", "vehicle", "animal"]
+        let hasImportantObject = observation.detectedObjects.contains { object in
+            importantLabels.contains { object.label.lowercased().contains($0) }
+        }
+
+        guard hasImportantObject else {
+            print("📊 Skipping observation: No important objects detected")
+            return false
+        }
+
+        // 3. Spatial uniqueness: Check if significantly different from recent observations
+        // (This would compare against last few stored observations - simplified for now)
+
+        return true
     }
 
     private func determineMessagePriority(_ navigation: NavigationOutput) -> MessagePriority {

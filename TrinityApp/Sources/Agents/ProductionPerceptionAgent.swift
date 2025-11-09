@@ -23,14 +23,17 @@ class ProductionPerceptionAgent: BaseAgent<PerceptionInput, PerceptionOutput> {
 
     init(embeddingGenerator: EmbeddingGenerator) throws {
         self.yoloDetector = YOLOv8Detector()
-        self.ocrEngine = OCREngine(recognitionLevel: .accurate)
+
+        // PERFORMANCE OPTIMIZATION: Use fast recognition level instead of accurate
+        self.ocrEngine = OCREngine(recognitionLevel: .fast)
+
         self.embeddingGenerator = embeddingGenerator
 
         super.init(name: "ProductionPerceptionAgent")
 
         print("✅ ProductionPerceptionAgent initialized with:")
-        print("   - YOLOv8 Object Detection")
-        print("   - OCR Engine (de-DE, en-US)")
+        print("   - YOLOv8 Object Detection + Vision Framework (Faces, Rectangles)")
+        print("   - OCR Engine (de-DE, en-US) - Fast Mode")
         print("   - ARKit Spatial Processing")
     }
 
@@ -91,23 +94,142 @@ class ProductionPerceptionAgent: BaseAgent<PerceptionInput, PerceptionOutput> {
         )
     }
 
-    // MARK: - Object Detection (YOLOv8)
+    // MARK: - Object Detection (YOLOv8 + Vision Framework)
 
     private func processObjectDetection(
         _ pixelBuffer: CVPixelBuffer,
         arFrame: ARFrame
     ) async throws -> [DetectedObject] {
+        // PERFORMANCE OPTIMIZATION: Run multiple Vision requests in parallel
+        async let yoloObjects = detectWithYOLO(pixelBuffer)
+        async let faces = detectFaces(pixelBuffer)
+        async let rectangles = detectRectangles(pixelBuffer)
+
         do {
-            let objects = try await yoloDetector.detectObjects(in: pixelBuffer)
-            print("🔍 Detected \(objects.count) objects")
-            return objects
+            let (yolo, detectedFaces, detectedRects) = try await (yoloObjects, faces, rectangles)
+
+            // Combine all detections
+            var allObjects = yolo
+            allObjects.append(contentsOf: detectedFaces)
+            allObjects.append(contentsOf: detectedRects)
+
+            print("🔍 Detected \(allObjects.count) objects (YOLOv8: \(yolo.count), Faces: \(detectedFaces.count), Rectangles: \(detectedRects.count))")
+            return allObjects
         } catch DetectionError.modelNotFound {
-            print("⚠️ YOLOv8 model not found, using ARKit plane detection")
-            return detectObjectsFromPlanes(arFrame)
+            print("⚠️ YOLOv8 model not found, using Vision Framework + ARKit fallback")
+            async let visionFaces = detectFaces(pixelBuffer)
+            async let visionRects = detectRectangles(pixelBuffer)
+            let (faces, rects) = try await (visionFaces, visionRects)
+
+            var objects = faces
+            objects.append(contentsOf: rects)
+            objects.append(contentsOf: detectObjectsFromPlanes(arFrame))
+
+            return objects
         } catch {
             print("❌ Object detection failed: \(error)")
             return []
         }
+    }
+
+    /// YOLO-based object detection
+    private func detectWithYOLO(_ pixelBuffer: CVPixelBuffer) async throws -> [DetectedObject] {
+        return try await yoloDetector.detectObjects(in: pixelBuffer)
+    }
+
+    /// Face detection using Vision Framework (lightweight for person detection)
+    private func detectFaces(_ pixelBuffer: CVPixelBuffer) async throws -> [DetectedObject] {
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = VNDetectFaceRectanglesRequest { request, error in
+                if let error = error {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                guard let faces = request.results as? [VNFaceObservation] else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                let detectedFaces = faces.compactMap { face -> DetectedObject? in
+                    guard face.confidence > 0.8 else { return nil }
+
+                    return DetectedObject(
+                        id: UUID(),
+                        label: "Person",
+                        confidence: face.confidence,
+                        boundingBox: self.convertVisionBox(face.boundingBox),
+                        spatialData: nil
+                    )
+                }
+
+                continuation.resume(returning: detectedFaces)
+            }
+
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(returning: [])
+            }
+        }
+    }
+
+    /// Rectangle detection for doors/windows (lightweight structural detection)
+    private func detectRectangles(_ pixelBuffer: CVPixelBuffer) async throws -> [DetectedObject] {
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = VNDetectRectanglesRequest { request, error in
+                if let error = error {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                guard let rectangles = request.results as? [VNRectangleObservation] else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                let detectedRectangles = rectangles.compactMap { rect -> DetectedObject? in
+                    guard rect.confidence > 0.85 else { return nil }
+
+                    // Only large rectangles (doors/windows) - at least 10% of image
+                    let area = rect.boundingBox.width * rect.boundingBox.height
+                    guard area > 0.1 else { return nil }
+
+                    return DetectedObject(
+                        id: UUID(),
+                        label: "Tür oder Fenster",
+                        confidence: rect.confidence,
+                        boundingBox: self.convertVisionBox(rect.boundingBox),
+                        spatialData: nil
+                    )
+                }
+
+                continuation.resume(returning: detectedRectangles)
+            }
+
+            // Performance limit: Maximum 5 rectangles
+            request.maximumObservations = 5
+
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(returning: [])
+            }
+        }
+    }
+
+    /// Convert Vision bounding box to TRINITY format
+    private func convertVisionBox(_ visionBox: CGRect) -> BoundingBox {
+        return BoundingBox(
+            x: Float(visionBox.midX),
+            y: Float(visionBox.midY),
+            z: 0,
+            width: Float(visionBox.width),
+            height: Float(visionBox.height),
+            depth: 0
+        )
     }
 
     /// Fallback: Extrahiere Objekte aus ARKit Planes (wenn kein YOLOv8 Model)
