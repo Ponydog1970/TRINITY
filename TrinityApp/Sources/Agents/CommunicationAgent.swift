@@ -54,8 +54,14 @@ struct SpatialAudio {
 
 /// Agent that generates user-friendly communication
 class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
+    // PERFORMANCE OPTIMIZATION: Non-Blocking Speech
     private let synthesizer = AVSpeechSynthesizer()
+    private let speechQueue = DispatchQueue(label: "com.trinity.speech", qos: .userInteractive)
     private var isSpeaking = false
+
+    // Priority Queue for messages
+    private var messageQueue: PriorityQueue<SpeechMessage> = PriorityQueue()
+    private let queueLock = NSLock()
 
     // Verbosity settings
     private var verbosityLevel: VerbosityLevel = .medium
@@ -68,6 +74,7 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
 
     init() {
         super.init(name: "CommunicationAgent")
+        synthesizer.delegate = SpeechDelegate(agent: self)
     }
 
     override func process(_ input: CommunicationInput) async throws -> CommunicationOutput {
@@ -334,13 +341,52 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
         return nil
     }
 
-    // MARK: - Speech Synthesis
+    // MARK: - Speech Synthesis (Non-Blocking)
 
+    /// PERFORMANCE: Non-blocking speech with priority queue
     func speak(_ message: String, priority: MessagePriority = .normal) {
-        let utterance = AVSpeechUtterance(string: message)
+        let speechMessage = SpeechMessage(text: message, priority: priority)
+
+        speechQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            self.queueLock.lock()
+            defer { self.queueLock.unlock() }
+
+            // Critical messages: Interrupt current speech and clear queue
+            if priority == .critical {
+                self.synthesizer.stopSpeaking(at: .immediate)
+                self.messageQueue.removeAll()
+                self.isSpeaking = false
+            }
+
+            // High priority: Interrupt but keep queue
+            if priority == .high && self.isSpeaking {
+                self.synthesizer.stopSpeaking(at: .word)
+            }
+
+            // Add to priority queue
+            self.messageQueue.enqueue(speechMessage)
+
+            // Process queue if not speaking
+            if !self.isSpeaking {
+                self.processNextMessage()
+            }
+        }
+    }
+
+    private func processNextMessage() {
+        queueLock.lock()
+        guard let nextMessage = messageQueue.dequeue() else {
+            queueLock.unlock()
+            return
+        }
+        queueLock.unlock()
+
+        let utterance = AVSpeechUtterance(string: nextMessage.text)
 
         // Adjust speech rate based on priority
-        switch priority {
+        switch nextMessage.priority {
         case .critical:
             utterance.rate = AVSpeechUtteranceMaximumSpeechRate * 0.5
             utterance.volume = 1.0
@@ -352,23 +398,35 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
             utterance.volume = 0.7
         }
 
-        // Use high-quality voice
+        // Use high-quality German voice
         if let voice = AVSpeechSynthesisVoice(language: "de-DE") {
             utterance.voice = voice
         }
 
-        // Stop current speech if critical
-        if priority >= .high && isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
-        }
-
         isSpeaking = true
-        synthesizer.speak(utterance)
+
+        // Speak on main thread (AVSpeechSynthesizer requirement)
+        DispatchQueue.main.async { [weak self] in
+            self?.synthesizer.speak(utterance)
+        }
+    }
+
+    fileprivate func didFinishSpeaking() {
+        isSpeaking = false
+        // Process next message in queue
+        processNextMessage()
     }
 
     func stopSpeaking() {
-        synthesizer.stopSpeaking(at: .immediate)
-        isSpeaking = false
+        speechQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            self.queueLock.lock()
+            self.synthesizer.stopSpeaking(at: .immediate)
+            self.messageQueue.removeAll()
+            self.isSpeaking = false
+            self.queueLock.unlock()
+        }
     }
 
     func setVerbosity(_ level: VerbosityLevel) {
@@ -377,5 +435,135 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
 
     override func reset() {
         stopSpeaking()
+    }
+}
+
+// MARK: - Supporting Types
+
+/// Message with priority for speech queue
+struct SpeechMessage: Comparable {
+    let text: String
+    let priority: MessagePriority
+    let timestamp: Date
+
+    init(text: String, priority: MessagePriority) {
+        self.text = text
+        self.priority = priority
+        self.timestamp = Date()
+    }
+
+    static func < (lhs: SpeechMessage, rhs: SpeechMessage) -> Bool {
+        // Higher priority comes first
+        if lhs.priority != rhs.priority {
+            return lhs.priority > rhs.priority
+        }
+        // Same priority: FIFO (older first)
+        return lhs.timestamp < rhs.timestamp
+    }
+}
+
+/// AVSpeechSynthesizerDelegate for completion tracking
+private class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
+    weak var agent: CommunicationAgent?
+
+    init(agent: CommunicationAgent) {
+        self.agent = agent
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        agent?.didFinishSpeaking()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        agent?.didFinishSpeaking()
+    }
+}
+
+/// Priority Queue implementation (Min-Heap)
+/// PERFORMANCE: O(log n) enqueue/dequeue
+struct PriorityQueue<Element: Comparable> {
+    private var heap: [Element] = []
+
+    var isEmpty: Bool {
+        return heap.isEmpty
+    }
+
+    var count: Int {
+        return heap.count
+    }
+
+    mutating func enqueue(_ element: Element) {
+        heap.append(element)
+        siftUp(from: heap.count - 1)
+    }
+
+    mutating func dequeue() -> Element? {
+        guard !heap.isEmpty else { return nil }
+
+        if heap.count == 1 {
+            return heap.removeLast()
+        }
+
+        let result = heap[0]
+        heap[0] = heap.removeLast()
+        siftDown(from: 0)
+
+        return result
+    }
+
+    func peek() -> Element? {
+        return heap.first
+    }
+
+    mutating func removeAll() {
+        heap.removeAll()
+    }
+
+    private mutating func siftUp(from index: Int) {
+        var child = index
+        var parent = parentIndex(of: child)
+
+        while child > 0 && heap[child] < heap[parent] {
+            heap.swapAt(child, parent)
+            child = parent
+            parent = parentIndex(of: child)
+        }
+    }
+
+    private mutating func siftDown(from index: Int) {
+        var parent = index
+
+        while true {
+            let left = leftChildIndex(of: parent)
+            let right = rightChildIndex(of: parent)
+            var candidate = parent
+
+            if left < heap.count && heap[left] < heap[candidate] {
+                candidate = left
+            }
+
+            if right < heap.count && heap[right] < heap[candidate] {
+                candidate = right
+            }
+
+            if candidate == parent {
+                return
+            }
+
+            heap.swapAt(parent, candidate)
+            parent = candidate
+        }
+    }
+
+    private func parentIndex(of index: Int) -> Int {
+        return (index - 1) / 2
+    }
+
+    private func leftChildIndex(of index: Int) -> Int {
+        return 2 * index + 1
+    }
+
+    private func rightChildIndex(of index: Int) -> Int {
+        return 2 * index + 2
     }
 }
