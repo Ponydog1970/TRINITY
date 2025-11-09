@@ -63,6 +63,9 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
     private var messageQueue: PriorityQueue<SpeechMessage> = PriorityQueue()
     private let queueLock = NSLock()
 
+    // SAFETY: Limit queue size to prevent memory leaks
+    private let maxQueueSize = 20
+
     // Verbosity settings
     private var verbosityLevel: VerbosityLevel = .medium
 
@@ -363,6 +366,13 @@ class CommunicationAgent: BaseAgent<CommunicationInput, CommunicationOutput> {
             // High priority: Interrupt but keep queue
             if priority == .high && self.isSpeaking {
                 self.synthesizer.stopSpeaking(at: .word)
+            }
+
+            // SAFETY CHECK: Prevent queue overflow
+            if self.messageQueue.count >= self.maxQueueSize {
+                // Remove lowest priority message
+                _ = self.messageQueue.dequeue()
+                print("⚠️ Speech queue full, dropping lowest priority message")
             }
 
             // Add to priority queue

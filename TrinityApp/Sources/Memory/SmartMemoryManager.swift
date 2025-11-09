@@ -11,6 +11,7 @@ import CoreLocation
 
 /// Smart Memory Manager with multi-factor importance scoring
 /// Prevents memory explosion through intelligent filtering and aggressive GC
+/// THREAD-SAFE: Inherits serial queue protection from MemoryManager
 @MainActor
 class SmartMemoryManager: MemoryManager {
 

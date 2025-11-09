@@ -35,6 +35,9 @@ class MemoryManager: ObservableObject {
     private let deduplicationEngine: DeduplicationEngine
     let vectorDatabase: VectorDatabaseProtocol
 
+    // THREAD SAFETY: Serial queue for write operations
+    private let writeQueue = DispatchQueue(label: "com.trinity.memory.write", qos: .userInitiated)
+
     init(vectorDatabase: VectorDatabaseProtocol) {
         self.vectorDatabase = vectorDatabase
         self.deduplicationEngine = DeduplicationEngine(
@@ -46,6 +49,7 @@ class MemoryManager: ObservableObject {
     // MARK: - Memory Operations
 
     /// Add a new observation to the appropriate memory layer
+    /// THREAD-SAFE: Uses serial queue for write operations
     func addObservation(_ observation: Observation, embedding: [Float]) async throws {
         let metadata = MemoryMetadata(
             objectType: observation.detectedObjects.first?.label ?? "unknown",
@@ -63,17 +67,27 @@ class MemoryManager: ObservableObject {
             memoryLayer: .working
         )
 
-        // Check for duplicates
+        // Check for duplicates (read operation, safe)
         if let existingEntry = try await deduplicationEngine.findDuplicate(
             newEntry,
             in: workingMemory
         ) {
-            // Merge with existing entry
+            // Merge with existing entry (write operation, protected)
             let merged = deduplicationEngine.merge(existing: existingEntry, new: newEntry)
-            updateEntry(merged)
+            await withCheckedContinuation { continuation in
+                writeQueue.async { [weak self] in
+                    self?.updateEntry(merged)
+                    continuation.resume()
+                }
+            }
         } else {
-            // Add to working memory
-            addToWorkingMemory(newEntry)
+            // Add to working memory (write operation, protected)
+            await withCheckedContinuation { continuation in
+                writeQueue.async { [weak self] in
+                    self?.addToWorkingMemory(newEntry)
+                    continuation.resume()
+                }
+            }
         }
     }
 

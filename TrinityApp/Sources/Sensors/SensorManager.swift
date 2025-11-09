@@ -89,6 +89,12 @@ class SensorManager: NSObject, ObservableObject {
     // MARK: - Session Control
 
     func startSession() {
+        // SAFETY CHECK: Verify camera permission before starting
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            print("❌ Camera permission not granted")
+            return
+        }
+
         guard let arSession = arSession else { return }
 
         let configuration = ARWorldTrackingConfiguration()
@@ -101,9 +107,16 @@ class SensorManager: NSObject, ObservableObject {
         arSession.run(configuration)
         isARSessionRunning = true
 
-        // Start location updates
-        locationManager?.startUpdatingLocation()
-        locationManager?.startUpdatingHeading()
+        // SAFETY CHECK: Start location updates only if authorized
+        if let locationManager = locationManager {
+            let status = locationManager.authorizationStatus
+            if status == .authorizedWhenInUse || status == .authorizedAlways {
+                locationManager.startUpdatingLocation()
+                locationManager.startUpdatingHeading()
+            } else {
+                print("❌ Location permission not granted")
+            }
+        }
     }
 
     func pauseSession() {

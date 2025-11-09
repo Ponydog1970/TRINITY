@@ -24,6 +24,8 @@ enum DetectionError: Error {
 class YOLOv8Detector {
     private var visionModel: VNCoreMLModel?
     private let confidenceThreshold: Float = 0.5
+    private var isModelLoading = false
+    private var modelLoadTask: Task<Void, Never>?
 
     // Object Categories optimiert für Navigation/Accessibility
     private let navigationRelevantObjects = Set([
@@ -36,37 +38,67 @@ class YOLOv8Detector {
     ])
 
     init() {
-        loadModel()
+        // PERFORMANCE FIX: Start async model loading immediately, don't block
+        modelLoadTask = Task {
+            await loadModelAsync()
+        }
     }
 
-    /// Lade Core ML Model
-    private func loadModel() {
-        // OPTION 1: Custom YOLOv8 Model (wenn vorhanden)
-        if let modelURL = Bundle.main.url(forResource: "yolov8n", withExtension: "mlmodelc") {
-            do {
-                let mlModel = try MLModel(contentsOf: modelURL)
-                self.visionModel = try VNCoreMLModel(for: mlModel)
-                print("✅ YOLOv8 Model loaded successfully")
-                return
-            } catch {
-                print("⚠️ Failed to load custom YOLOv8 model: \(error)")
-            }
-        }
+    /// Lade Core ML Model ASYNCHRONOUSLY
+    /// FIX: Prevents UI freeze on app startup
+    private func loadModelAsync() async {
+        guard !isModelLoading else { return }
+        isModelLoading = true
 
-        // OPTION 2: Apple's MobileNetV2 (Fallback)
-        // Wenn kein Custom Model vorhanden, nutze Apple's vortrainiertes
-        if let defaultModel = try? VNCoreMLModel(for: MobileNetV2().model) {
-            self.visionModel = defaultModel
-            print("⚠️ Using fallback MobileNetV2 model")
-            print("💡 Download YOLOv8 for better accuracy: https://github.com/ultralytics/ultralytics")
-        } else {
-            print("❌ No object detection model available")
-            print("📥 Please download YOLOv8n.mlmodel and add to project")
-        }
+        // Run on background queue
+        await Task.detached(priority: .userInitiated) {
+            // OPTION 1: Custom YOLOv8 Model (wenn vorhanden)
+            if let modelURL = Bundle.main.url(forResource: "yolov8n", withExtension: "mlmodelc") {
+                do {
+                    let mlModel = try MLModel(contentsOf: modelURL)
+                    let visionModel = try VNCoreMLModel(for: mlModel)
+
+                    // Update on main thread
+                    await MainActor.run {
+                        self.visionModel = visionModel
+                        self.isModelLoading = false
+                        print("✅ YOLOv8 Model loaded successfully (async)")
+                    }
+                    return
+                } catch {
+                    print("⚠️ Failed to load custom YOLOv8 model: \(error)")
+                }
+            }
+
+            // OPTION 2: Apple's MobileNetV2 (Fallback)
+            if let defaultModel = try? VNCoreMLModel(for: MobileNetV2().model) {
+                await MainActor.run {
+                    self.visionModel = defaultModel
+                    self.isModelLoading = false
+                    print("⚠️ Using fallback MobileNetV2 model (async)")
+                    print("💡 Download YOLOv8 for better accuracy: https://github.com/ultralytics/ultralytics")
+                }
+            } else {
+                await MainActor.run {
+                    self.isModelLoading = false
+                    print("❌ No object detection model available")
+                    print("📥 Please download YOLOv8n.mlmodel and add to project")
+                }
+            }
+        }.value
+    }
+
+    /// Ensure model is loaded before detection
+    private func ensureModelLoaded() async {
+        // Wait for model loading to complete
+        await modelLoadTask?.value
     }
 
     /// Erkenne Objekte in Bild
     func detectObjects(in image: CVPixelBuffer) async throws -> [DetectedObject] {
+        // Ensure model is loaded
+        await ensureModelLoaded()
+
         guard let model = visionModel else {
             throw DetectionError.modelNotFound
         }
