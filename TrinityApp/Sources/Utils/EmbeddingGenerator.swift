@@ -19,27 +19,105 @@ protocol EmbeddingGeneratorProtocol {
 
 /// Generates embeddings locally using Core ML
 class EmbeddingGenerator: EmbeddingGeneratorProtocol {
-    // Core ML models (would be actual models in production)
+    // Core ML models for enhanced feature extraction
     private var visionModel: VNCoreMLModel?
     private var textModel: NLEmbedding?
 
     private let embeddingDimension = 512
 
+    // Performance tracking
+    private var generationTimes: [TimeInterval] = []
+    private let maxTrackingSamples = 100
+
     init() throws {
-        // Initialize text embedding model
+        // Initialize text embedding model (multilingual for German + English)
         textModel = NLEmbedding.sentenceEmbedding(for: .english)
 
-        // In production, load actual Core ML models:
-        // self.visionModel = try VNCoreMLModel(for: MobileNetV3().model)
+        // Try to load German text model for better localization
+        if NLEmbedding.supportedSentenceEmbeddings.contains(.german) {
+            // Fall back to English if German not available
+            textModel = NLEmbedding.sentenceEmbedding(for: .german) ?? textModel
+        }
+
+        // PERFORMANCE OPTIMIZATION: Load Core ML model for vision features
+        // Try to load production model, gracefully fall back to Vision framework
+        do {
+            // Attempt to load MobileNetV3 or similar model from app bundle
+            // Model should be in Resources/Models/MobileNetV3Feature.mlmodel
+            if let modelURL = Bundle.main.url(
+                forResource: "MobileNetV3Feature",
+                withExtension: "mlmodelc"
+            ) {
+                let mlModel = try MLModel(contentsOf: modelURL)
+                self.visionModel = try VNCoreMLModel(for: mlModel)
+                print("✅ Loaded production Core ML model: MobileNetV3")
+            } else {
+                // Model not found, will use VNGenerateImageFeaturePrintRequest
+                print("ℹ️ Core ML model not found, using Vision framework feature extraction")
+                self.visionModel = nil
+            }
+        } catch {
+            print("⚠️ Failed to load Core ML model: \(error), using Vision framework fallback")
+            self.visionModel = nil
+        }
     }
 
     // MARK: - Image Embeddings
 
     func generateEmbedding(from image: Data) async throws -> [Float] {
+        let startTime = Date()
+        defer {
+            let duration = Date().timeIntervalSince(startTime)
+            trackGenerationTime(duration)
+        }
+
         guard let cgImage = createCGImage(from: image) else {
             throw EmbeddingError.invalidImage
         }
 
+        // PERFORMANCE OPTIMIZATION: Use Core ML model if available, else Vision framework
+        if let visionModel = visionModel {
+            return try await generateEmbeddingWithCoreML(cgImage, model: visionModel)
+        } else {
+            return try await generateEmbeddingWithVision(cgImage)
+        }
+    }
+
+    private func generateEmbeddingWithCoreML(
+        _ image: CGImage,
+        model: VNCoreMLModel
+    ) async throws -> [Float] {
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = VNCoreMLRequest(model: model) { request, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                guard let results = request.results as? [VNFeaturePrintObservation],
+                      let observation = results.first else {
+                    continuation.resume(throwing: EmbeddingError.noFeatures)
+                    return
+                }
+
+                let embedding = self.convertFeaturePrint(observation)
+                continuation.resume(returning: embedding)
+            }
+
+            request.imageCropAndScaleOption = .centerCrop
+            request.usesCPUOnly = false  // Use Neural Engine
+
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func generateEmbeddingWithVision(_ image: CGImage) async throws -> [Float] {
         return try await withCheckedThrowingContinuation { continuation in
             let request = VNGenerateImageFeaturePrintRequest { request, error in
                 if let error = error {
@@ -57,7 +135,7 @@ class EmbeddingGenerator: EmbeddingGeneratorProtocol {
                 continuation.resume(returning: embedding)
             }
 
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
 
             do {
                 try handler.perform([request])
@@ -65,6 +143,24 @@ class EmbeddingGenerator: EmbeddingGeneratorProtocol {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    private func trackGenerationTime(_ duration: TimeInterval) {
+        generationTimes.append(duration)
+        if generationTimes.count > maxTrackingSamples {
+            generationTimes.removeFirst()
+        }
+
+        // Log if slow
+        if duration > 0.1 {
+            let avgTime = generationTimes.reduce(0, +) / Double(generationTimes.count)
+            print("⚠️ Slow embedding generation: \(Int(duration * 1000))ms (avg: \(Int(avgTime * 1000))ms)")
+        }
+    }
+
+    func getAverageGenerationTime() -> TimeInterval {
+        guard !generationTimes.isEmpty else { return 0 }
+        return generationTimes.reduce(0, +) / Double(generationTimes.count)
     }
 
     private func createCGImage(from data: Data) -> CGImage? {

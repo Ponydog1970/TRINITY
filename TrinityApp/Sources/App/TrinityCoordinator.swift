@@ -127,24 +127,62 @@ class TrinityCoordinator: ObservableObject {
         currentStatus = .processing
 
         do {
-            // Step 1: Perception - Process sensor data
-            let perceptionInput = PerceptionInput(
-                cameraFrame: observation.cameraImage,
-                depthData: observation.depthMap,
-                arFrame: nil,  // ARFrame is handled internally by SensorManager
-                timestamp: observation.timestamp
-            )
+            // PERFORMANCE OPTIMIZATION: Parallel Processing
+            // Run Perception and Embedding generation in parallel using TaskGroup
 
-            let perceptionOutput = try await perceptionAgent.process(perceptionInput)
+            let (perceptionOutput, embedding, contextResults) = try await withThrowingTaskGroup(
+                of: TaskResult.self,
+                returning: (PerceptionOutput, [Float], [VectorEntry]).self
+            ) { group in
+                // Task 1: Perception - Process sensor data
+                group.addTask {
+                    let perceptionInput = PerceptionInput(
+                        cameraFrame: observation.cameraImage,
+                        depthData: observation.depthMap,
+                        arFrame: nil,  // ARFrame is handled internally by SensorManager
+                        timestamp: observation.timestamp
+                    )
+                    let output = try await self.perceptionAgent.process(perceptionInput)
+                    return .perception(output)
+                }
 
-            // Step 2: Generate embedding
-            let embedding = try await embeddingGenerator.generateEmbedding(from: observation)
+                // Task 2: Generate embedding (parallel to perception)
+                group.addTask {
+                    let emb = try await self.embeddingGenerator.generateEmbedding(from: observation)
+                    return .embedding(emb)
+                }
 
-            // Step 3: Store in memory
-            try await memoryManager.addObservation(observation, embedding: embedding)
+                // Collect parallel results
+                var perceptionResult: PerceptionOutput?
+                var embeddingResult: [Float]?
 
-            // Step 4: Search for relevant context
-            let contextResults = try await memoryManager.search(embedding: embedding, topK: 10)
+                for try await result in group {
+                    switch result {
+                    case .perception(let output):
+                        perceptionResult = output
+                    case .embedding(let emb):
+                        embeddingResult = emb
+                    case .context:
+                        break // Not used in this phase
+                    }
+                }
+
+                guard let perception = perceptionResult,
+                      let emb = embeddingResult else {
+                    throw TrinityError.notConfigured
+                }
+
+                // Store in memory (depends on embedding)
+                try await self.memoryManager.addObservation(observation, embedding: emb)
+
+                // Search for relevant context (depends on embedding)
+                let context = try await self.memoryManager.search(embedding: emb, topK: 10)
+
+                return (perception, emb, context)
+            }
+
+            // SEQUENTIAL PROCESSING: Context → Navigation → Communication
+            // These steps depend on each other and must run sequentially
 
             // Step 5: Context - Assemble contextual information
             let contextInput = ContextInput(
@@ -193,6 +231,14 @@ class TrinityCoordinator: ObservableObject {
             let nextObservation = processingQueue.removeFirst()
             await processObservation(nextObservation)
         }
+    }
+
+    // MARK: - Task Result Type
+
+    private enum TaskResult {
+        case perception(PerceptionOutput)
+        case embedding([Float])
+        case context([VectorEntry])
     }
 
     private func determineMessagePriority(_ navigation: NavigationOutput) -> MessagePriority {
