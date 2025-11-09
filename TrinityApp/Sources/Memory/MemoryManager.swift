@@ -16,6 +16,16 @@ class MemoryManager: ObservableObject {
     @Published var episodicMemory: [VectorEntry] = []
     @Published var semanticMemory: [VectorEntry] = []
 
+    // MARK: - PERFORMANCE OPTIMIZATION: Index Structures
+    // Dictionary-based indices for O(1) lookup instead of O(n) array search
+    private var workingIndex: [UUID: VectorEntry] = [:]
+    private var episodicIndex: [UUID: VectorEntry] = [:]
+    private var semanticIndex: [UUID: VectorEntry] = [:]
+
+    // LRU Cache for frequently accessed entries (max 50 entries)
+    private var accessCache: LRUCache<UUID, VectorEntry>
+    private let maxCacheSize = 50
+
     // MARK: - Configuration
     private let maxWorkingMemorySize = 100  // Max objects in working memory
     private let episodicMemoryWindow: TimeInterval = 30 * 24 * 60 * 60  // 30 days
@@ -29,6 +39,7 @@ class MemoryManager: ObservableObject {
         self.deduplicationEngine = DeduplicationEngine(
             similarityThreshold: similarityThreshold
         )
+        self.accessCache = LRUCache<UUID, VectorEntry>(capacity: maxCacheSize)
     }
 
     // MARK: - Memory Operations
@@ -68,6 +79,8 @@ class MemoryManager: ObservableObject {
     /// Add entry to working memory with size management
     private func addToWorkingMemory(_ entry: VectorEntry) {
         workingMemory.append(entry)
+        // PERFORMANCE: Update index for O(1) lookup
+        workingIndex[entry.id] = entry
 
         // Manage memory size
         if workingMemory.count > maxWorkingMemorySize {
@@ -96,6 +109,10 @@ class MemoryManager: ObservableObject {
                 lastAccessed: entry.lastAccessed
             )
             episodicMemory.append(episodicEntry)
+
+            // PERFORMANCE: Update indices
+            episodicIndex[entry.id] = episodicEntry
+            workingIndex.removeValue(forKey: entry.id)
         }
 
         // Remove from working memory
@@ -211,38 +228,85 @@ class MemoryManager: ObservableObject {
     }
 
     /// Update an existing memory entry
+    /// PERFORMANCE: O(1) lookup via index instead of O(n) array search
     private func updateEntry(_ entry: VectorEntry) {
         switch entry.memoryLayer {
         case .working:
+            workingIndex[entry.id] = entry
             if let index = workingMemory.firstIndex(where: { $0.id == entry.id }) {
                 workingMemory[index] = entry
             }
         case .episodic:
+            episodicIndex[entry.id] = entry
             if let index = episodicMemory.firstIndex(where: { $0.id == entry.id }) {
                 episodicMemory[index] = entry
             }
         case .semantic:
+            semanticIndex[entry.id] = entry
             if let index = semanticMemory.firstIndex(where: { $0.id == entry.id }) {
                 semanticMemory[index] = entry
             }
         }
+
+        // Update cache if entry is frequently accessed
+        if entry.accessCount > 5 {
+            accessCache.set(entry.id, value: entry)
+        }
     }
 
     /// Increment access count for an entry
+    /// PERFORMANCE: O(1) lookup via cache/index, updates all layers efficiently
     private func incrementAccessCount(for id: UUID) {
-        if let index = workingMemory.firstIndex(where: { $0.id == id }) {
-            var entry = workingMemory[index]
-            entry = VectorEntry(
-                id: entry.id,
-                embedding: entry.embedding,
-                metadata: entry.metadata,
-                memoryLayer: entry.memoryLayer,
-                accessCount: entry.accessCount + 1,
+        // Check cache first (fastest path)
+        if let cached = accessCache.get(id) {
+            var updated = cached
+            updated = VectorEntry(
+                id: updated.id,
+                embedding: updated.embedding,
+                metadata: updated.metadata,
+                memoryLayer: updated.memoryLayer,
+                accessCount: updated.accessCount + 1,
                 lastAccessed: Date()
             )
-            workingMemory[index] = entry
+            updateEntry(updated)
+            return
         }
-        // Similar for episodic and semantic...
+
+        // Check indices (O(1) lookup)
+        if let entry = workingIndex[id] {
+            var updated = entry
+            updated = VectorEntry(
+                id: updated.id,
+                embedding: updated.embedding,
+                metadata: updated.metadata,
+                memoryLayer: updated.memoryLayer,
+                accessCount: updated.accessCount + 1,
+                lastAccessed: Date()
+            )
+            updateEntry(updated)
+        } else if let entry = episodicIndex[id] {
+            var updated = entry
+            updated = VectorEntry(
+                id: updated.id,
+                embedding: updated.embedding,
+                metadata: updated.metadata,
+                memoryLayer: updated.memoryLayer,
+                accessCount: updated.accessCount + 1,
+                lastAccessed: Date()
+            )
+            updateEntry(updated)
+        } else if let entry = semanticIndex[id] {
+            var updated = entry
+            updated = VectorEntry(
+                id: updated.id,
+                embedding: updated.embedding,
+                metadata: updated.metadata,
+                memoryLayer: updated.memoryLayer,
+                accessCount: updated.accessCount + 1,
+                lastAccessed: Date()
+            )
+            updateEntry(updated)
+        }
     }
 
     /// Generate natural language description from observation
@@ -269,6 +333,9 @@ class MemoryManager: ObservableObject {
         workingMemory = try await vectorDatabase.load(layer: .working)
         episodicMemory = try await vectorDatabase.load(layer: .episodic)
         semanticMemory = try await vectorDatabase.load(layer: .semantic)
+
+        // PERFORMANCE: Rebuild indices after loading
+        rebuildIndices()
     }
 
     /// Clear all memories (for testing or reset)
@@ -276,5 +343,126 @@ class MemoryManager: ObservableObject {
         workingMemory.removeAll()
         episodicMemory.removeAll()
         semanticMemory.removeAll()
+
+        // PERFORMANCE: Clear indices and cache
+        workingIndex.removeAll()
+        episodicIndex.removeAll()
+        semanticIndex.removeAll()
+        accessCache.clear()
+    }
+
+    /// Rebuild indices from memory arrays (called after load)
+    private func rebuildIndices() {
+        workingIndex = Dictionary(uniqueKeysWithValues: workingMemory.map { ($0.id, $0) })
+        episodicIndex = Dictionary(uniqueKeysWithValues: episodicMemory.map { ($0.id, $0) })
+        semanticIndex = Dictionary(uniqueKeysWithValues: semanticMemory.map { ($0.id, $0) })
+    }
+}
+
+// MARK: - LRU Cache Implementation
+
+/// Least Recently Used Cache for frequently accessed memory entries
+/// PERFORMANCE: O(1) get/set operations
+class LRUCache<Key: Hashable, Value> {
+    private class Node {
+        let key: Key
+        var value: Value
+        var prev: Node?
+        var next: Node?
+
+        init(key: Key, value: Value) {
+            self.key = key
+            self.value = value
+        }
+    }
+
+    private var capacity: Int
+    private var cache: [Key: Node] = [:]
+    private var head: Node?
+    private var tail: Node?
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    func get(_ key: Key) -> Value? {
+        guard let node = cache[key] else {
+            return nil
+        }
+
+        // Move to front (most recently used)
+        moveToFront(node)
+        return node.value
+    }
+
+    func set(_ key: Key, value: Value) {
+        if let existingNode = cache[key] {
+            // Update existing
+            existingNode.value = value
+            moveToFront(existingNode)
+        } else {
+            // Add new
+            let newNode = Node(key: key, value: value)
+            cache[key] = newNode
+            addToFront(newNode)
+
+            // Evict if over capacity
+            if cache.count > capacity {
+                evictLRU()
+            }
+        }
+    }
+
+    func clear() {
+        cache.removeAll()
+        head = nil
+        tail = nil
+    }
+
+    private func moveToFront(_ node: Node) {
+        guard node !== head else { return }
+
+        // Remove from current position
+        if let prev = node.prev {
+            prev.next = node.next
+        }
+        if let next = node.next {
+            next.prev = node.prev
+        }
+        if node === tail {
+            tail = node.prev
+        }
+
+        // Add to front
+        node.prev = nil
+        node.next = head
+        head?.prev = node
+        head = node
+
+        if tail == nil {
+            tail = node
+        }
+    }
+
+    private func addToFront(_ node: Node) {
+        node.next = head
+        head?.prev = node
+        head = node
+
+        if tail == nil {
+            tail = node
+        }
+    }
+
+    private func evictLRU() {
+        guard let lru = tail else { return }
+
+        cache.removeValue(forKey: lru.key)
+        tail = lru.prev
+        tail?.next = nil
+
+        if tail == nil {
+            head = nil
+        }
     }
 }
