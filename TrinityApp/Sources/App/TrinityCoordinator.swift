@@ -20,6 +20,7 @@ class TrinityCoordinator: ObservableObject {
     // MARK: - Components
     private let sensorManager: SensorManager
     private let memoryManager: MemoryManager
+    private let conceptualMemoryManager: ConceptualMemoryManager
     private let embeddingGenerator: EmbeddingGenerator
     private let agentCoordinator: AgentCoordinator
 
@@ -47,6 +48,10 @@ class TrinityCoordinator: ObservableObject {
         let vectorDB = try HNSWVectorDatabase()
         self.memoryManager = MemoryManager(vectorDatabase: vectorDB)
         self.embeddingGenerator = try EmbeddingGenerator()
+        self.conceptualMemoryManager = ConceptualMemoryManager(
+            vectorDatabase: vectorDB,
+            embeddingGenerator: self.embeddingGenerator
+        )
         self.sensorManager = SensorManager()
         self.agentCoordinator = AgentCoordinator()
 
@@ -371,6 +376,143 @@ class TrinityCoordinator: ObservableObject {
         try await memoryManager.loadMemories()
     }
 
+    // MARK: - Conceptual Memory API
+
+    /// Add a thought with automatic linking to current location
+    func addThought(
+        _ content: String,
+        category: ThoughtMemory.ThoughtCategory,
+        importance: Float = 0.5,
+        emotionalTone: ThoughtMemory.EmotionalTone? = nil
+    ) async throws {
+        let currentLocation = sensorManager.currentLocation?.coordinate
+
+        try await conceptualMemoryManager.addThought(
+            content: content,
+            category: category,
+            importance: importance,
+            linkedLocation: currentLocation,
+            emotionalTone: emotionalTone
+        )
+
+        print("💭 Thought added: \(content.prefix(50))...")
+    }
+
+    /// Add a conversation with redundancy reduction
+    func addConversation(
+        participants: [String],
+        messages: [ConversationMemory.Message],
+        summary: String,
+        keyTopics: [String],
+        keyInsights: [String],
+        importance: Float = 0.5
+    ) async throws {
+        let currentLocation = sensorManager.currentLocation?.coordinate
+
+        try await conceptualMemoryManager.addConversation(
+            participants: participants,
+            messages: messages,
+            summary: summary,
+            keyTopics: keyTopics,
+            keyInsights: keyInsights,
+            location: currentLocation,
+            importance: importance
+        )
+
+        print("💬 Conversation added: \(keyTopics.joined(separator: ", "))")
+    }
+
+    /// Add an idea with evolution tracking
+    func addIdea(
+        title: String,
+        description: String,
+        tags: [String],
+        importance: Float = 0.6
+    ) async throws {
+        try await conceptualMemoryManager.addIdea(
+            title: title,
+            description: description,
+            tags: tags,
+            importance: importance
+        )
+
+        print("💡 Idea added: \(title)")
+    }
+
+    /// Add a note or reminder
+    func addNote(
+        title: String,
+        content: String,
+        tags: [String] = [],
+        isReminder: Bool = false,
+        reminderDate: Date? = nil
+    ) async throws {
+        let currentLocation = sensorManager.currentLocation?.coordinate
+
+        try await conceptualMemoryManager.addNote(
+            title: title,
+            content: content,
+            tags: tags,
+            isReminder: isReminder,
+            reminderDate: reminderDate,
+            linkedLocation: currentLocation
+        )
+
+        print("📝 Note added: \(title)")
+    }
+
+    /// Add a plan or appointment
+    func addPlan(
+        title: String,
+        description: String,
+        scheduledDate: Date,
+        participants: [String]? = nil,
+        tags: [String] = []
+    ) async throws {
+        let currentLocation = sensorManager.currentLocation?.coordinate
+
+        try await conceptualMemoryManager.addPlan(
+            title: title,
+            description: description,
+            scheduledDate: scheduledDate,
+            location: currentLocation,
+            participants: participants,
+            tags: tags
+        )
+
+        print("📅 Plan added: \(title)")
+    }
+
+    /// Search thoughts by content
+    func searchThoughts(query: String, limit: Int = 10) async throws -> [ThoughtMemory] {
+        return try await conceptualMemoryManager.searchThoughts(query: query, limit: limit)
+    }
+
+    /// Search conversations by topic
+    func searchConversations(query: String, limit: Int = 10) async throws -> [ConversationMemory] {
+        return try await conceptualMemoryManager.searchConversations(query: query, limit: limit)
+    }
+
+    /// Search ideas
+    func searchIdeas(query: String, limit: Int = 10) async throws -> [IdeaMemory] {
+        return try await conceptualMemoryManager.searchIdeas(query: query, limit: limit)
+    }
+
+    /// Mark idea as implemented
+    func markIdeaImplemented(_ ideaId: UUID) {
+        conceptualMemoryManager.markIdeaImplemented(ideaId)
+    }
+
+    /// Mark plan as completed
+    func markPlanCompleted(_ planId: UUID) {
+        conceptualMemoryManager.markPlanCompleted(planId)
+    }
+
+    /// Get conceptual memory statistics
+    func getConceptualMemoryStatistics() -> ConceptualMemoryStatistics {
+        return conceptualMemoryManager.getStatistics()
+    }
+
     // MARK: - Feedback
 
     private func triggerHapticFeedback(_ pattern: HapticPattern) {
@@ -411,12 +553,17 @@ class TrinityCoordinator: ObservableObject {
 
     func getSystemStatistics() async throws -> SystemStatistics {
         let dbStats = try await memoryManager.vectorDatabase.getStatistics()
+        let conceptualStats = conceptualMemoryManager.getStatistics()
 
         return SystemStatistics(
             totalObservations: processingQueue.count,
             workingMemorySize: memoryManager.workingMemory.count,
             episodicMemorySize: memoryManager.episodicMemory.count,
             semanticMemorySize: memoryManager.semanticMemory.count,
+            conceptualMemories: conceptualStats.totalMemories,
+            totalThoughts: conceptualStats.totalThoughts,
+            totalConversations: conceptualStats.totalConversations,
+            totalIdeas: conceptualStats.totalIdeas,
             isRunning: isRunning,
             currentStatus: currentStatus
         )
@@ -467,6 +614,10 @@ struct SystemStatistics {
     let workingMemorySize: Int
     let episodicMemorySize: Int
     let semanticMemorySize: Int
+    let conceptualMemories: Int
+    let totalThoughts: Int
+    let totalConversations: Int
+    let totalIdeas: Int
     let isRunning: Bool
     let currentStatus: SystemStatus
 }
