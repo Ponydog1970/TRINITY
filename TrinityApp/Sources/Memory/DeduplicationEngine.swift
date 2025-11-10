@@ -6,32 +6,173 @@
 //
 
 import Foundation
+import CoreLocation
 
 /// Engine for detecting and merging duplicate memories
 class DeduplicationEngine {
-    private let similarityThreshold: Float
-
+    private var baseSimilarityThreshold: Float
+    
+    // Dynamic threshold adjustment based on context
+    private var contextualThresholds: [String: Float] = [:]
+    
     init(similarityThreshold: Float = 0.95) {
-        self.similarityThreshold = similarityThreshold
+        self.baseSimilarityThreshold = similarityThreshold
+        initializeContextualThresholds()
+    }
+    
+    private func initializeContextualThresholds() {
+        // Different thresholds for different data types
+        contextualThresholds = [
+            "person": 0.98,      // Higher threshold for people (more precision)
+            "object": 0.95,      // Standard for objects
+            "place": 0.92,       // Lower for places (more tolerance)
+            "scene": 0.90,       // Even lower for general scenes
+            "text": 0.97,        // High for text (must be accurate)
+            "unknown": 0.95      // Default
+        ]
+    }
+    
+    /// Dynamically adjust similarity threshold based on context
+    func adjustThreshold(for objectType: String, confidence: Float) -> Float {
+        // Get base threshold for object type
+        let baseThreshold = contextualThresholds[objectType.lowercased()] ?? baseSimilarityThreshold
+        
+        // Adjust based on confidence level
+        // High confidence: can use lower threshold (more tolerance)
+        // Low confidence: need higher threshold (more strict)
+        let confidenceAdjustment = (1.0 - confidence) * 0.05
+        let adjustedThreshold = baseThreshold + confidenceAdjustment
+        
+        return min(adjustedThreshold, 0.99) // Cap at 0.99
+    }
+    
+    /// Update contextual thresholds based on observed patterns
+    func updateContextualThreshold(for objectType: String, newThreshold: Float) {
+        contextualThresholds[objectType.lowercased()] = newThreshold
     }
 
-    /// Find a duplicate entry in the given memory array
+    /// Find a duplicate entry in the given memory array with metadata-based checks
     func findDuplicate(
         _ entry: VectorEntry,
         in memory: [VectorEntry]
     ) async throws -> VectorEntry? {
+        // Get dynamic threshold based on context
+        let threshold = adjustThreshold(
+            for: entry.metadata.objectType,
+            confidence: entry.metadata.confidence
+        )
+        
         for existingEntry in memory {
             let similarity = entry.similarity(to: existingEntry.embedding)
 
-            if similarity >= similarityThreshold {
-                // Additional checks for true duplicates
-                if isSpatiallyClose(entry, to: existingEntry) &&
-                   isTemporallyClose(entry, to: existingEntry) {
-                    return existingEntry
+            if similarity >= threshold {
+                // Enhanced metadata-based deduplication checks
+                let metadataScore = calculateMetadataSimilarity(entry, to: existingEntry)
+                
+                // Require both embedding similarity and metadata similarity
+                if metadataScore >= 0.7 {
+                    // Additional spatial and temporal checks
+                    if isSpatiallyClose(entry, to: existingEntry) &&
+                       isTemporallyClose(entry, to: existingEntry) {
+                        return existingEntry
+                    }
                 }
             }
         }
         return nil
+    }
+    
+    /// Calculate metadata similarity incorporating spatial and temporal tags
+    private func calculateMetadataSimilarity(
+        _ a: VectorEntry,
+        to b: VectorEntry
+    ) -> Float {
+        var similarityScore: Float = 0.0
+        var totalWeight: Float = 0.0
+        
+        // 1. Object type similarity (weight: 0.3)
+        if a.metadata.objectType == b.metadata.objectType {
+            similarityScore += 1.0 * 0.3
+        }
+        totalWeight += 0.3
+        
+        // 2. Tag overlap (weight: 0.2)
+        let tagsA = Set(a.metadata.tags)
+        let tagsB = Set(b.metadata.tags)
+        if !tagsA.isEmpty && !tagsB.isEmpty {
+            let intersection = tagsA.intersection(tagsB)
+            let union = tagsA.union(tagsB)
+            let tagSimilarity = Float(intersection.count) / Float(union.count)
+            similarityScore += tagSimilarity * 0.2
+        }
+        totalWeight += 0.2
+        
+        // 3. Spatial similarity (weight: 0.25)
+        if let spatialA = a.metadata.spatialData,
+           let spatialB = b.metadata.spatialData {
+            let spatialSim = boundingBoxSimilarity(
+                spatialA.boundingBox,
+                spatialB.boundingBox
+            )
+            similarityScore += spatialSim * 0.25
+            totalWeight += 0.25
+        }
+        
+        // 4. Temporal similarity (weight: 0.15)
+        let temporalSim = calculateTemporalSimilarity(a.metadata.timestamp, b.metadata.timestamp)
+        similarityScore += temporalSim * 0.15
+        totalWeight += 0.15
+        
+        // 5. Location similarity if available (weight: 0.1)
+        if let locA = a.metadata.location,
+           let locB = b.metadata.location {
+            let locationSim = calculateLocationSimilarity(locA, locB)
+            similarityScore += locationSim * 0.1
+            totalWeight += 0.1
+        }
+        
+        return totalWeight > 0 ? similarityScore / totalWeight : 0.0
+    }
+    
+    /// Calculate temporal similarity (returns 1.0 if very close, decays with time)
+    private func calculateTemporalSimilarity(_ time1: Date, _ time2: Date) -> Float {
+        let timeInterval = abs(time1.timeIntervalSince(time2))
+        
+        // Exponential decay: similar if within minutes, less similar as hours pass
+        let hoursApart = timeInterval / 3600.0
+        let similarity = Float(exp(-hoursApart / 24.0)) // 24-hour decay constant
+        
+        return similarity
+    }
+    
+    /// Calculate location similarity based on distance
+    private func calculateLocationSimilarity(
+        _ loc1: CLLocationCoordinate2D,
+        _ loc2: CLLocationCoordinate2D
+    ) -> Float {
+        // Calculate haversine distance
+        let lat1 = loc1.latitude * .pi / 180
+        let lat2 = loc2.latitude * .pi / 180
+        let lon1 = loc1.longitude * .pi / 180
+        let lon2 = loc2.longitude * .pi / 180
+        
+        let dLat = lat2 - lat1
+        let dLon = lon2 - lon1
+        
+        let a = sin(dLat/2) * sin(dLat/2) +
+                cos(lat1) * cos(lat2) *
+                sin(dLon/2) * sin(dLon/2)
+        let c = 2 * atan2(sqrt(a), sqrt(1-a))
+        let distance = 6371000 * c // Earth radius in meters
+        
+        // Similar if within 100 meters
+        if distance < 10 {
+            return 1.0
+        } else if distance < 100 {
+            return Float(1.0 - (distance - 10) / 90.0)
+        } else {
+            return 0.0
+        }
     }
 
     /// Merge two memory entries (existing and new observation)
@@ -94,14 +235,24 @@ class DeduplicationEngine {
         return distance < 0.5
     }
 
-    /// Check if two entries are temporally close
+    /// Check if two entries are temporally close (with adaptive threshold)
     private func isTemporallyClose(_ a: VectorEntry, to b: VectorEntry) -> Bool {
         let timeInterval = abs(
             a.metadata.timestamp.timeIntervalSince(b.metadata.timestamp)
         )
+        
+        // Adaptive temporal threshold based on memory layer
+        let threshold: TimeInterval
+        switch a.memoryLayer {
+        case .working:
+            threshold = 60  // 1 minute for working memory
+        case .episodic:
+            threshold = 300 // 5 minutes for episodic
+        case .semantic:
+            threshold = 3600 // 1 hour for semantic
+        }
 
-        // Consider close if within 60 seconds
-        return timeInterval < 60
+        return timeInterval < threshold
     }
 
     /// Calculate spatial similarity between bounding boxes
