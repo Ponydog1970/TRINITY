@@ -150,7 +150,7 @@ class EmbeddingGenerator: EmbeddingGeneratorProtocol {
         }
 
         // Spatial embedding from depth data
-        if let depthData = observation.depthData {
+        if let depthData = observation.depthMap {
             let spatialEmbedding = generateSpatialEmbedding(from: depthData)
             embeddings.append(spatialEmbedding)
         }

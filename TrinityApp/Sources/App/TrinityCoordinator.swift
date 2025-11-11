@@ -21,6 +21,7 @@ class TrinityCoordinator: ObservableObject {
     private let sensorManager: SensorManager
     private let memoryManager: MemoryManager
     private let embeddingGenerator: EmbeddingGenerator
+    private let vectorDatabase: VectorDatabase
     private let agentCoordinator: AgentCoordinator
 
     // MARK: - Agents
@@ -28,6 +29,7 @@ class TrinityCoordinator: ObservableObject {
     private let navigationAgent: NavigationAgent
     private let contextAgent: ContextAgent
     private let communicationAgent: CommunicationAgent
+    private let ragAgent: RAGAgent
 
     // MARK: - State
     private var cancellables = Set<AnyCancellable>()
@@ -42,6 +44,7 @@ class TrinityCoordinator: ObservableObject {
     init() throws {
         // Initialize components
         let vectorDB = try VectorDatabase()
+        self.vectorDatabase = vectorDB
         self.memoryManager = MemoryManager(vectorDatabase: vectorDB)
         self.embeddingGenerator = try EmbeddingGenerator()
         self.sensorManager = SensorManager()
@@ -52,12 +55,19 @@ class TrinityCoordinator: ObservableObject {
         self.navigationAgent = NavigationAgent()
         self.contextAgent = ContextAgent(memoryManager: memoryManager)
         self.communicationAgent = CommunicationAgent()
+        self.ragAgent = RAGAgent(
+            memoryManager: memoryManager,
+            embeddingGenerator: embeddingGenerator,
+            vectorDatabase: vectorDB,
+            contextAgent: contextAgent
+        )
 
         // Register agents
         agentCoordinator.register(perceptionAgent)
         agentCoordinator.register(navigationAgent)
         agentCoordinator.register(contextAgent)
         agentCoordinator.register(communicationAgent)
+        agentCoordinator.register(ragAgent)
     }
 
     // MARK: - System Control
@@ -255,6 +265,75 @@ class TrinityCoordinator: ObservableObject {
         communicationAgent.setVerbosity(level)
     }
 
+    // MARK: - RAG (Retrieval-Augmented Generation)
+
+    /// Process a natural language query using RAG
+    func askQuestion(
+        _ query: String,
+        maxContextItems: Int = 10,
+        memoryLayers: [MemoryLayerType]? = nil
+    ) async throws -> RAGOutput {
+        guard isRunning else {
+            throw TrinityError.notRunning
+        }
+
+        currentStatus = .processing
+
+        do {
+            // Generate query embedding
+            let queryEmbedding = try await embeddingGenerator.generateEmbedding(from: query)
+
+            // Create RAG input
+            let ragInput = RAGInput(
+                query: query,
+                queryEmbedding: queryEmbedding,
+                maxContextItems: maxContextItems,
+                memoryLayers: memoryLayers,
+                includeCurrentObservation: true
+            )
+
+            // Process through RAG agent
+            let ragOutput = try await ragAgent.process(ragInput)
+
+            // Speak the answer
+            communicationAgent.speak(ragOutput.answer)
+            lastSpokenMessage = ragOutput.answer
+
+            currentStatus = .idle
+            return ragOutput
+
+        } catch {
+            currentStatus = .error(error)
+            throw error
+        }
+    }
+
+    /// Ask a question with current observation context
+    func askQuestionWithContext(
+        _ query: String,
+        currentObservation: Observation? = nil
+    ) async throws -> RAGOutput {
+        // If no observation provided, try to capture current one
+        let observation = currentObservation ?? sensorManager.captureCurrentObservation()
+
+        // Generate embedding for current observation if available
+        var queryEmbedding: [Float]?
+        if let observation = observation {
+            queryEmbedding = try? await embeddingGenerator.generateEmbedding(from: observation)
+        }
+
+        // Create RAG input with observation context
+        let ragInput = RAGInput(
+            query: query,
+            queryEmbedding: queryEmbedding,
+            maxContextItems: 15,
+            memoryLayers: nil, // Search all layers
+            includeCurrentObservation: observation != nil
+        )
+
+        return try await ragAgent.process(ragInput)
+    }
+
     // MARK: - Memory Management
 
     func consolidateMemories() async {
@@ -270,11 +349,11 @@ class TrinityCoordinator: ObservableObject {
     }
 
     func exportMemories() async throws -> URL {
-        return try await memoryManager.vectorDatabase.exportToiCloud()
+        return try await vectorDatabase.exportToiCloud()
     }
 
     func importMemories(from url: URL) async throws {
-        try await memoryManager.vectorDatabase.importFromiCloud(bundleURL: url)
+        try await vectorDatabase.importFromiCloud(bundleURL: url)
         try await memoryManager.loadMemories()
     }
 
