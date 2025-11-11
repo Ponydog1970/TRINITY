@@ -22,7 +22,7 @@ class MemoryManager: ObservableObject {
     private let similarityThreshold: Float = 0.95  // For deduplication
 
     private let deduplicationEngine: DeduplicationEngine
-    private let vectorDatabase: VectorDatabase
+    let vectorDatabase: VectorDatabase  // Made internal for RAG system access
 
     init(vectorDatabase: VectorDatabase) {
         self.vectorDatabase = vectorDatabase

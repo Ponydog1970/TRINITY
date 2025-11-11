@@ -28,6 +28,7 @@ class TrinityCoordinator: ObservableObject {
     private let navigationAgent: NavigationAgent
     private let contextAgent: ContextAgent
     private let communicationAgent: CommunicationAgent
+    private let ragAgent: RAGAgent
 
     // MARK: - State
     private var cancellables = Set<AnyCancellable>()
@@ -52,12 +53,18 @@ class TrinityCoordinator: ObservableObject {
         self.navigationAgent = NavigationAgent()
         self.contextAgent = ContextAgent(memoryManager: memoryManager)
         self.communicationAgent = CommunicationAgent()
+        self.ragAgent = RAGAgent(
+            memoryManager: memoryManager,
+            embeddingGenerator: embeddingGenerator,
+            contextAgent: contextAgent
+        )
 
         // Register agents
         agentCoordinator.register(perceptionAgent)
         agentCoordinator.register(navigationAgent)
         agentCoordinator.register(contextAgent)
         agentCoordinator.register(communicationAgent)
+        agentCoordinator.register(ragAgent)
     }
 
     // MARK: - System Control
@@ -253,6 +260,106 @@ class TrinityCoordinator: ObservableObject {
 
     func adjustVerbosity(_ level: CommunicationAgent.VerbosityLevel) {
         communicationAgent.setVerbosity(level)
+    }
+    
+    // MARK: - RAG Query Interface
+    
+    /// Process a user query using RAG (Retrieval-Augmented Generation)
+    /// - Parameters:
+    ///   - query: The user's question or request
+    ///   - queryType: Type of query (auto-detected if nil)
+    ///   - includeTemporalContext: Whether to include temporal context
+    ///   - includeSpatialContext: Whether to include spatial context
+    /// - Returns: RAG output with answer and context
+    func processQuery(
+        _ query: String,
+        queryType: RAGQueryType? = nil,
+        includeTemporalContext: Bool = true,
+        includeSpatialContext: Bool = true
+    ) async throws -> RAGOutput {
+        guard isRunning else {
+            throw TrinityError.notRunning
+        }
+        
+        currentStatus = .processing
+        
+        // Auto-detect query type if not provided
+        let detectedType = queryType ?? detectQueryType(from: query)
+        
+        // Create RAG input
+        let ragInput = RAGInput(
+            query: query,
+            queryType: detectedType,
+            maxResults: 10,
+            memoryLayers: nil, // Let RAG agent decide
+            includeTemporalContext: includeTemporalContext,
+            includeSpatialContext: includeSpatialContext
+        )
+        
+        // Process query
+        let ragOutput = try await ragAgent.process(ragInput)
+        
+        // Speak the answer
+        communicationAgent.speak(ragOutput.answer)
+        lastSpokenMessage = ragOutput.answer
+        
+        currentStatus = .idle
+        
+        return ragOutput
+    }
+    
+    /// Ask a simple question and get an answer
+    func askQuestion(_ question: String) async throws -> String {
+        let output = try await processQuery(question, queryType: .question)
+        return output.answer
+    }
+    
+    /// Get a description of what's currently around
+    func describeSurroundings() async throws -> String {
+        let output = try await processQuery(
+            "Beschreibe die Umgebung",
+            queryType: .description
+        )
+        return output.answer
+    }
+    
+    /// Query memory for what has been seen before
+    func queryMemory(_ question: String) async throws -> String {
+        let output = try await processQuery(question, queryType: .memory)
+        return output.answer
+    }
+    
+    /// Auto-detect query type from query text
+    private func detectQueryType(from query: String) -> RAGQueryType {
+        let queryLower = query.lowercased()
+        
+        // Navigation queries
+        if queryLower.contains("wie komme") || queryLower.contains("navigiere") ||
+           queryLower.contains("route") || queryLower.contains("weg") {
+            return .navigation
+        }
+        
+        // Memory queries
+        if queryLower.contains("schon mal") || queryLower.contains("vorher") ||
+           queryLower.contains("erinnern") || queryLower.contains("gesehen") {
+            return .memory
+        }
+        
+        // Description queries
+        if queryLower.contains("beschreibe") || queryLower.contains("was ist") ||
+           queryLower.contains("umgebung") || queryLower.contains("szene") {
+            return .description
+        }
+        
+        // Question queries (default)
+        if queryLower.contains("?") || queryLower.contains("was") ||
+           queryLower.contains("wo") || queryLower.contains("wann") ||
+           queryLower.contains("wie") || queryLower.contains("warum") {
+            return .question
+        }
+        
+        // Default to general
+        return .general
     }
 
     // MARK: - Memory Management
