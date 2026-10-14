@@ -17,18 +17,54 @@ class MemoryManager: ObservableObject {
     @Published var semanticMemory: [VectorEntry] = []
 
     // MARK: - Configuration
-    private let maxWorkingMemorySize = 100  // Max objects in working memory
+    private var maxWorkingMemorySize = 100  // Max objects in working memory (adaptive)
+    private let baseWorkingMemorySize = 100  // Base size for adaptive scaling
     private let episodicMemoryWindow: TimeInterval = 30 * 24 * 60 * 60  // 30 days
     private let similarityThreshold: Float = 0.95  // For deduplication
 
     private let deduplicationEngine: DeduplicationEngine
     private let vectorDatabase: VectorDatabase
+    private let resourceMonitor: ResourceMonitor
+    private let consolidationPredictor: ConsolidationPredictor
+    
+    // MARK: - Usage Metrics
+    private var routingMetrics: RoutingMetrics = RoutingMetrics()
+    
+    struct RoutingMetrics {
+        var workingToEpisodicTransitions: Int = 0
+        var episodicToSemanticTransitions: Int = 0
+        var totalSearches: Int = 0
+        var averageSearchLatency: TimeInterval = 0.0
+    }
 
     init(vectorDatabase: VectorDatabase) {
         self.vectorDatabase = vectorDatabase
         self.deduplicationEngine = DeduplicationEngine(
             similarityThreshold: similarityThreshold
         )
+        self.resourceMonitor = ResourceMonitor()
+        self.consolidationPredictor = ConsolidationPredictor()
+        
+        // Start adaptive resource monitoring
+        Task {
+            await startAdaptiveResourceManagement()
+        }
+    }
+    
+    // MARK: - Adaptive Resource Management
+    
+    /// Continuously monitor and adjust memory limits based on system resources
+    private func startAdaptiveResourceManagement() async {
+        // Adjust working memory size based on available resources
+        let recommendedSize = resourceMonitor.getRecommendedWorkingMemorySize(
+            baseSize: baseWorkingMemorySize
+        )
+        maxWorkingMemorySize = recommendedSize
+        
+        // Check if aggressive consolidation is needed
+        if resourceMonitor.shouldConsolidateAggressively() {
+            await performAggressiveConsolidation()
+        }
     }
 
     // MARK: - Memory Operations
@@ -69,23 +105,31 @@ class MemoryManager: ObservableObject {
     private func addToWorkingMemory(_ entry: VectorEntry) {
         workingMemory.append(entry)
 
-        // Manage memory size
+        // Manage memory size with adaptive limits
         if workingMemory.count > maxWorkingMemorySize {
-            // Move least recently accessed to episodic memory
-            consolidateWorkingMemory()
+            // Move least recently accessed to episodic memory using LRU strategy
+            consolidateWorkingMemoryWithLRU()
         }
     }
 
-    /// Move entries from working to episodic memory
-    private func consolidateWorkingMemory() {
-        // Sort by last accessed time
-        let sorted = workingMemory.sorted { $0.lastAccessed < $1.lastAccessed }
-
-        // Move oldest 20% to episodic memory
-        let moveCount = maxWorkingMemorySize / 5
+    /// Move entries from working to episodic memory using LRU with priority
+    private func consolidateWorkingMemoryWithLRU() {
+        // Calculate priority scores for each entry (higher = more important to keep)
+        let scoredEntries = workingMemory.map { entry -> (entry: VectorEntry, priority: Double) in
+            let priority = calculatePriority(for: entry)
+            return (entry, priority)
+        }
+        
+        // Sort by priority (ascending) - lowest priority will be evicted first
+        let sorted = scoredEntries.sorted { $0.priority < $1.priority }
+        
+        // Determine how many to move based on resource constraints
+        let targetSize = Int(Double(maxWorkingMemorySize) * 0.8) // Target 80% capacity
+        let moveCount = max(workingMemory.count - targetSize, maxWorkingMemorySize / 5)
         let toMove = sorted.prefix(moveCount)
-
-        for entry in toMove {
+        
+        // Use ML predictor to decide consolidation for each entry
+        for (entry, _) in toMove {
             var episodicEntry = entry
             episodicEntry = VectorEntry(
                 id: entry.id,
@@ -96,25 +140,106 @@ class MemoryManager: ObservableObject {
                 lastAccessed: entry.lastAccessed
             )
             episodicMemory.append(episodicEntry)
+            routingMetrics.workingToEpisodicTransitions += 1
+            
+            // Train predictor with this consolidation decision
+            consolidationPredictor.train(entry: entry, shouldConsolidate: true)
         }
 
         // Remove from working memory
         workingMemory.removeAll { entry in
-            toMove.contains { $0.id == entry.id }
+            toMove.contains { $0.entry.id == entry.id }
         }
     }
+    
+    /// Calculate priority score for LRU eviction (higher = keep in memory)
+    private func calculatePriority(for entry: VectorEntry) -> Double {
+        let now = Date()
+        
+        // Recency score (0-1, higher if accessed recently)
+        let timeSinceAccess = now.timeIntervalSince(entry.lastAccessed)
+        let recencyScore = exp(-timeSinceAccess / 300.0) // 5-minute decay
+        
+        // Frequency score (normalized)
+        let frequencyScore = min(Double(entry.accessCount) / 20.0, 1.0)
+        
+        // Confidence score
+        let confidenceScore = Double(entry.metadata.confidence)
+        
+        // Weighted combination
+        let priority = (recencyScore * 0.4) + (frequencyScore * 0.4) + (confidenceScore * 0.2)
+        
+        return priority
+    }
+    
+    /// Perform aggressive consolidation when resources are constrained
+    private func performAggressiveConsolidation() async {
+        // Reduce working memory to minimum
+        let minSize = maxWorkingMemorySize / 2
+        
+        if workingMemory.count > minSize {
+            let scoredEntries = workingMemory.map { entry -> (entry: VectorEntry, priority: Double) in
+                let priority = calculatePriority(for: entry)
+                return (entry, priority)
+            }
+            
+            let sorted = scoredEntries.sorted { $0.priority < $1.priority }
+            let moveCount = workingMemory.count - minSize
+            let toMove = sorted.prefix(moveCount)
+            
+            for (entry, _) in toMove {
+                var episodicEntry = entry
+                episodicEntry = VectorEntry(
+                    id: entry.id,
+                    embedding: entry.embedding,
+                    metadata: entry.metadata,
+                    memoryLayer: .episodic,
+                    accessCount: entry.accessCount,
+                    lastAccessed: entry.lastAccessed
+                )
+                episodicMemory.append(episodicEntry)
+            }
+            
+            workingMemory.removeAll { entry in
+                toMove.contains { $0.entry.id == entry.id }
+            }
+        }
+        
+        // Also consolidate episodic to semantic more aggressively
+        await consolidateEpisodicMemory()
+    }
 
-    /// Promote frequently accessed episodic memories to semantic
+    /// Promote frequently accessed episodic memories to semantic with ML prediction
     func consolidateEpisodicMemory() async {
-        // Find patterns and frequently accessed items
-        let candidates = episodicMemory
-            .filter { $0.accessCount > 10 }
-            .sorted { $0.accessCount > $1.accessCount }
-
-        for candidate in candidates.prefix(20) {
+        // Cluster episodic events before consolidation
+        let clusters = deduplicationEngine.clusterSimilarMemories(
+            episodicMemory,
+            threshold: 0.85
+        )
+        
+        // Process each cluster
+        for cluster in clusters {
+            guard !cluster.isEmpty else { continue }
+            
+            // Use ML predictor to determine if cluster should be consolidated
+            let predictions = consolidationPredictor.predictBatch(
+                cluster,
+                threshold: 0.7
+            )
+            
+            // Get entries that should be consolidated
+            let toConsolidate = predictions.filter { $0.shouldConsolidate }.map { $0.entry }
+            
+            if toConsolidate.isEmpty {
+                continue
+            }
+            
+            // Create representative entry from cluster
+            let representative = deduplicationEngine.createRepresentative(from: toConsolidate)
+            
             // Check if similar concept already exists in semantic memory
             if let similar = try? await findSimilar(
-                to: candidate.embedding,
+                to: representative.embedding,
                 in: semanticMemory,
                 threshold: 0.85
             ) {
@@ -125,22 +250,33 @@ class MemoryManager: ObservableObject {
                     embedding: similar.embedding,
                     metadata: similar.metadata,
                     memoryLayer: .semantic,
-                    accessCount: similar.accessCount + candidate.accessCount,
+                    accessCount: similar.accessCount + representative.accessCount,
                     lastAccessed: Date()
                 )
                 updateEntry(updated)
             } else {
                 // Create new semantic memory
-                var semanticEntry = candidate
+                var semanticEntry = representative
                 semanticEntry = VectorEntry(
-                    id: candidate.id,
-                    embedding: candidate.embedding,
-                    metadata: candidate.metadata,
+                    id: representative.id,
+                    embedding: representative.embedding,
+                    metadata: representative.metadata,
                     memoryLayer: .semantic,
-                    accessCount: candidate.accessCount,
-                    lastAccessed: candidate.lastAccessed
+                    accessCount: representative.accessCount,
+                    lastAccessed: representative.lastAccessed
                 )
                 semanticMemory.append(semanticEntry)
+                routingMetrics.episodicToSemanticTransitions += 1
+            }
+            
+            // Train predictor with consolidation outcomes
+            for entry in toConsolidate {
+                consolidationPredictor.train(entry: entry, shouldConsolidate: true)
+            }
+            
+            // Remove consolidated entries from episodic memory
+            episodicMemory.removeAll { entry in
+                toConsolidate.contains { $0.id == entry.id }
             }
         }
 
@@ -154,15 +290,20 @@ class MemoryManager: ObservableObject {
         episodicMemory.removeAll { $0.metadata.timestamp < cutoffDate }
     }
 
-    /// Search across all memory layers
+    /// Search across all memory layers with flexible routing
     func search(embedding: [Float], topK: Int = 5) async throws -> [VectorEntry] {
+        let startTime = Date()
         var results: [VectorEntry] = []
+        
+        // Intelligently determine search strategy based on resource availability
+        let resourceLevel = resourceMonitor.getMemoryLevel()
+        let searchDepth: SearchDepth = determineSearchDepth(resourceLevel: resourceLevel)
 
         // Search working memory first (most relevant)
         let workingResults = workingMemory
             .map { entry in (entry, entry.similarity(to: embedding)) }
             .sorted { $0.1 > $1.1 }
-            .prefix(topK)
+            .prefix(searchDepth.workingK)
             .map { $0.0 }
         results.append(contentsOf: workingResults)
 
@@ -170,7 +311,7 @@ class MemoryManager: ObservableObject {
         let episodicResults = episodicMemory
             .map { entry in (entry, entry.similarity(to: embedding)) }
             .sorted { $0.1 > $1.1 }
-            .prefix(topK)
+            .prefix(searchDepth.episodicK)
             .map { $0.0 }
         results.append(contentsOf: episodicResults)
 
@@ -178,23 +319,77 @@ class MemoryManager: ObservableObject {
         let semanticResults = semanticMemory
             .map { entry in (entry, entry.similarity(to: embedding)) }
             .sorted { $0.1 > $1.1 }
-            .prefix(topK)
+            .prefix(searchDepth.semanticK)
             .map { $0.0 }
         results.append(contentsOf: semanticResults)
 
-        // Sort all results by similarity and return top K
-        let allResults = results
-            .map { entry in (entry, entry.similarity(to: embedding)) }
-            .sorted { $0.1 > $1.1 }
+        // Apply relevance weighting based on memory layer
+        let weightedResults = results.map { entry -> (entry: VectorEntry, score: Float) in
+            let similarity = entry.similarity(to: embedding)
+            let layerWeight = getLayerWeight(for: entry.memoryLayer)
+            let recencyBoost = getRecencyBoost(for: entry)
+            let weightedScore = similarity * layerWeight + recencyBoost
+            return (entry, weightedScore)
+        }
+        
+        // Sort all results by weighted score and return top K
+        let allResults = weightedResults
+            .sorted { $0.score > $1.score }
             .prefix(topK)
-            .map { $0.0 }
+            .map { $0.entry }
 
-        // Update access counts
+        // Update access counts and usage metrics
         for entry in allResults {
             incrementAccessCount(for: entry.id)
         }
+        
+        // Update routing metrics
+        let searchLatency = Date().timeIntervalSince(startTime)
+        routingMetrics.totalSearches += 1
+        routingMetrics.averageSearchLatency = (
+            routingMetrics.averageSearchLatency * Double(routingMetrics.totalSearches - 1) +
+            searchLatency
+        ) / Double(routingMetrics.totalSearches)
 
         return Array(allResults)
+    }
+    
+    struct SearchDepth {
+        let workingK: Int
+        let episodicK: Int
+        let semanticK: Int
+    }
+    
+    private func determineSearchDepth(resourceLevel: ResourceMonitor.ResourceLevel) -> SearchDepth {
+        switch resourceLevel {
+        case .abundant:
+            return SearchDepth(workingK: 10, episodicK: 10, semanticK: 10)
+        case .normal:
+            return SearchDepth(workingK: 7, episodicK: 7, semanticK: 7)
+        case .constrained:
+            return SearchDepth(workingK: 5, episodicK: 5, semanticK: 3)
+        case .critical:
+            return SearchDepth(workingK: 3, episodicK: 2, semanticK: 1)
+        }
+    }
+    
+    private func getLayerWeight(for layer: MemoryLayerType) -> Float {
+        switch layer {
+        case .working:
+            return 1.2  // Boost working memory (most recent)
+        case .episodic:
+            return 1.0  // Normal weight
+        case .semantic:
+            return 0.9  // Slightly lower (more general)
+        }
+    }
+    
+    private func getRecencyBoost(for entry: VectorEntry) -> Float {
+        let hoursSinceAccess = Date().timeIntervalSince(entry.lastAccessed) / 3600.0
+        
+        // Exponential decay: boost recent accesses
+        let boost = Float(exp(-hoursSinceAccess / 24.0)) * 0.1
+        return boost
     }
 
     /// Find similar entries in a specific memory layer
@@ -276,5 +471,57 @@ class MemoryManager: ObservableObject {
         workingMemory.removeAll()
         episodicMemory.removeAll()
         semanticMemory.removeAll()
+    }
+    
+    // MARK: - Metrics & Monitoring
+    
+    /// Get current routing metrics
+    func getRoutingMetrics() -> RoutingMetrics {
+        return routingMetrics
+    }
+    
+    /// Get current memory statistics
+    func getMemoryStatistics() -> MemoryStatistics {
+        return MemoryStatistics(
+            workingMemoryCount: workingMemory.count,
+            workingMemoryCapacity: maxWorkingMemorySize,
+            episodicMemoryCount: episodicMemory.count,
+            semanticMemoryCount: semanticMemory.count,
+            totalMemoryCount: workingMemory.count + episodicMemory.count + semanticMemory.count,
+            averageAccessCount: calculateAverageAccessCount(),
+            resourceLevel: resourceMonitor.getMemoryLevel()
+        )
+    }
+    
+    struct MemoryStatistics {
+        let workingMemoryCount: Int
+        let workingMemoryCapacity: Int
+        let episodicMemoryCount: Int
+        let semanticMemoryCount: Int
+        let totalMemoryCount: Int
+        let averageAccessCount: Double
+        let resourceLevel: ResourceMonitor.ResourceLevel
+    }
+    
+    private func calculateAverageAccessCount() -> Double {
+        let allEntries = workingMemory + episodicMemory + semanticMemory
+        guard !allEntries.isEmpty else { return 0.0 }
+        
+        let totalAccess = allEntries.reduce(0) { $0 + $1.accessCount }
+        return Double(totalAccess) / Double(allEntries.count)
+    }
+    
+    /// Trigger periodic maintenance tasks
+    func performPeriodicMaintenance() async {
+        // Adjust memory limits based on current resources
+        await startAdaptiveResourceManagement()
+        
+        // Consolidate episodic memories if needed
+        if episodicMemory.count > 500 {
+            await consolidateEpisodicMemory()
+        }
+        
+        // Clean up old episodic memories
+        cleanupEpisodicMemory()
     }
 }
